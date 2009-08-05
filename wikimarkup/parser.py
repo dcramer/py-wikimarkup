@@ -32,7 +32,7 @@ MW_COLON_STATE_COMMENT = 5
 MW_COLON_STATE_COMMENTDASH = 6
 MW_COLON_STATE_COMMENTDASHDASH = 7
 
-_attributePat = re.compile(ur'''(?:^|\s)([A-Za-z0-9]+)(?:\s*=\s*(?:"([^<"]*)"|'([^<']*)'|([a-zA-Z0-9!#$%&()*,\-./:;<>?@[\]^_`{|}~]+)|#([0-9a-fA-F]+)))''', re.UNICODE)
+_attributePat = re.compile(ur'''(?:^|\s)([A-Za-z0-9]+)(?:\s*=\s*(?:\"([^<\"]*)\"|\'([^<\']*)\'|([a-zA-Z0-9!#$%&()*,\-./:;<>?@\[\]^_{|}~]+)|#([0-9a-fA-F]+)))''', re.UNICODE)
 _space = re.compile(ur'\s+', re.UNICODE)
 _closePrePat = re.compile(u"</pre", re.UNICODE | re.IGNORECASE)
 _openPrePat = re.compile(u"<pre", re.UNICODE | re.IGNORECASE)
@@ -441,9 +441,11 @@ class BaseParser(object):
             global env
             env = {}
 
-    ''' Used to store objects in the environment 
-        used to prevent recursive imports '''
     def store_object(self, namespace, key, value=True):
+        """
+        Used to store objects in the environment 
+        which assists in preventing recursive imports.
+        """
         # Store the item to not reprocess it    
         if namespace not in self.env:
             self.env[namespace] = {}
@@ -1599,9 +1601,10 @@ class BaseParser(object):
         return ''.join(output)
         
 class Parser(BaseParser):
-    def __init__(self, show_toc=True):
+    def __init__(self, show_toc=True, base_url=None):
         super(Parser, self).__init__()
         self.show_toc = show_toc
+        self.base_url = base_url
 
     def parse(self, text):
         utf8 = isinstance(text, str)
@@ -1614,6 +1617,8 @@ class Parser(BaseParser):
 
         text = self.strip(text)
         text = self.removeHtmlTags(text)
+        if self.base_url:
+            text = self.replaceVariables(text)
         text = self.doTableStuff(text)
         text = self.parseHorizontalRule(text)
         text = self.checkTOC(text)
@@ -1642,6 +1647,208 @@ class Parser(BaseParser):
         if text.find(u"__TOC__") != -1:
             text = text.replace(u"__TOC__", u"<!--MWTOC-->")
             self.show_toc = True
+        return text
+
+    def replaceVariables(self, text, args={}, argsOnly=False):
+        """
+        Replace magic variables, templates, and template arguments
+        with the appropriate text. Templates are substituted recursively,
+        taking care to avoid infinite loops.
+        """
+
+        # Prevent too big inclusions
+        # if (len(text) > self.max_include_size:
+        #     return text
+
+        # This function is called recursively. To keep track of arguments we need a stack:
+        self.arg_stack.append(args)
+    
+        braceCallbacks = {}
+        if not argsOnly:
+            braceCallbacks[2] = [None, self.braceSubstitution]
+        braceCallbacks[3] = [None, self.argSubstitution]
+    
+        callbacks = {
+            u'{': {
+                'end': u'}',
+                'cb': braceCallbacks,
+                'min': argsOnly and 3 or 2,
+                'max': 3
+            },
+            u'[': {
+                'end': u']',
+                'cb': {2: None},
+                'min': 2,
+                'max': 2
+            }
+        }
+        text = replace_callback(text, callbacks)
+        mArgStack.pop()
+    
+        return text
+
+    def replace_callback(self, text, callbacks):
+        """
+        parse any parentheses in format ((title|part|part))
+        and call callbacks to get a replacement text for any found piece
+        """
+        openingBraceStack = []      # this array will hold a stack of parentheses which are not closed yet
+        lastOpeningBrace = -1       # last not closed parentheses
+
+        validOpeningBraces = u''.join(callbacks.keys())
+    
+        i = 0
+        while i < len(text):
+            if lastOpeningBrace == -1:
+                currentClosing = u''
+                search = validOpeningBraces
+            else:
+                currentClosing = openingBraceStack[lastOpeningBrace]['braceEnd']
+                search = validOpeningBraces + u'|' + currentClosing
+            rule = None
+            pos = -1
+            for c in search:
+                pos = max(pos, text.find(c, i))
+            pos -= i
+            pos += 1
+            if pos == 0:
+                pos = len(text)-i
+            i += pos
+            if i < len(text):
+                if text[i] == u'|':
+                    found = 'pipe'
+                elif text[i] == currentClosing:
+                    found = 'close'
+                elif text[i] in callbacks:
+                    found = 'open'
+                    rule = callbacks[text[i]]
+                else:
+                    i += 1
+                    continue
+            else:
+                break
+        
+            if found == 'open':
+                # found opening brace, let's add it to parentheses stack
+                piece = {
+                    'brace': text[i],
+                    'braceEnd': rule['end'],
+                    'title': u'',
+                    'parts': None
+                }
+
+                # count opening brace characters
+                count = 0
+                while True:
+                    if text[i+count:i+1+count] == piece['brace']:
+                        count += 1
+                    else:
+                        break
+                piece['count'] = count
+                i += piece['count']
+                piece['startAt'] = piece['partStart'] = i
+
+                # we need to add to stack only if opening brace count is enough for one of the rules
+                if piece['count'] >= rule['min']:
+                    lastOpeningBrace += 1
+                    openingBraceStack[lastOpeningBrace] = piece
+            elif found == 'close':
+                maxCount = openingBraceStack[lastOpeningBrace]['count']
+                count = 0
+                while count < maxCount:
+                    if text[i+count:i+1+count] == text[i]:
+                        count += 1
+                    else:
+                        break
+            
+                # check for maximum matching characters (if there are 5 closing 
+                # characters, we will probably need only 3 - depending on the rules)
+                matchingCount = 0
+                matchingCallback = None
+                cbType = callbacks[openingBraceStack[lastOpeningBrace]['brace']]
+                if count > cbType['max']:
+                    # The specified maximum exists in the callback array, unless the caller 
+                    # has made an error
+                    matchingCount = cbType['max']
+                else:
+                    # Count is less than the maximum
+                    # Skip any gaps in the callback array to find the true largest match
+                    # Need to use array_key_exists not isset because the callback can be null
+                    matchingCount = count
+                    while matchingCount > 0 and matchingCount not in cbType['cb']:
+                        matchingCount -= 1
+            
+                if matchingCount <= 0:
+                    i += count
+                    continue
+                matchingCallback = cbType['cb'][matchingCount]
+            
+                # let's set a title or last part (if '|' was found)
+                if openingBraceStack[lastOpeningBrace]['parts'] is None:
+                    openingBraceStack[lastOpeningBrace]['title'] = \
+                        text[openingBraceStack[lastOpeningBrace]['partStart']:i]
+                else:
+                    openingBraceStack[lastOpeningBrace]['parts'].append( 
+                        text[openingBraceStack[lastOpeningBrace]['partStart']:i]
+                    )
+
+                pieceStart = openingBraceStack[lastOpeningBrace]['startAt'] - matchingCount
+                pieceEnd = i + matchingCount
+            
+                if callable(matchingCallback):
+                    cbArgs = {
+                        'text': text[pieceStart:pieceEnd],
+                        'title': openingBraceStack[lastOpeningBrace]['title'].strip(),
+                        'parts': openingBraceStack[lastOpeningBrace]['parts'],
+                        'lineStart': pieceStart > 0 and text[pieceStart-1] == u"\n"
+                    }
+                    # finally we can call a user callback and replace piece of text
+                    replaceWith = matchingCallback(cbArgs)
+                    text = text[:pieceStart] + replaceWith + text[pieceEnd:]
+                    i = pieceStart + len(replaceWith)
+                else:
+                    # null value for callback means that parentheses should be parsed, but not replaced
+                    i += matchingCount
+            
+                # reset last opening parentheses, but keep it in case there are unused characters
+                piece = {
+                    'brace': openingBraceStack[lastOpeningBrace]['brace'],   
+                    'braceEnd': openingBraceStack[lastOpeningBrace]['braceEnd'],
+                    'count': openingBraceStack[lastOpeningBrace]['count'],
+                    'title': u'',
+                    'parts': None,
+                    'startAt': openingBraceStack[lastOpeningBrace]['startAt']
+                }
+                openingBraceStack[lastOpeningBrace] = None
+                lastOpeningBrace -= 1
+            
+                if matchingCount < piece['count']:
+                    piece['count'] -= matchingCount
+                    piece['startAt'] -= matchingCount
+                    piece['partStart'] = piece['startAt']
+                    # do we still qualify for any callback with remaining count?
+                    currentCbList = callbacks[piece['brace']]['cb']
+                    while piece['count']:
+                        if piece['count'] in currentCbList:
+                            lastOpeningBrace += 1
+                            openingBraceStack[lastOpeningBrace] = piece
+                            break
+                    
+                        piece['count'] -= 1
+        
+            elif found == 'pipe':
+                # lets set a title if it is a first separator, or next part otherwise
+                if opeingBraceStack[lastOpeningBrace]['parts'] is None:
+                    openingBraceStack[lastOpeningBrace]['title'] = \
+                        text[openingBraceStack[lastOpeningBrace]['partStart']:i]
+                    openingBraceStack[lastOpeningBrace]['parts'] = []
+                else:
+                    openingBraceStack[lastOpeningBrace]['parts'].append(
+                        text[openingBraceStack[lastOpeningBrace]['partStart']:i]
+                    )
+                i += 1
+                openingBraceStack[lastOpeningBrace]['partStart'] = i
+
         return text
 
     def doTableStuff(self, text):
