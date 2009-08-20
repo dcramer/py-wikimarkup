@@ -1,3 +1,4 @@
 *.pyc
 dist/
 build/
+py_wikimarkup.egg-info/
