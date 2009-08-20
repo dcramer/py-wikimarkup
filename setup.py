@@ -1,13 +1,15 @@
 #!/usr/bin/env python
 
-from distutils.core import setup
+from setuptools import setup, find_packages
 
 setup(
-    name='wikimarkup',
-    version='1.01',
+    name='py-wikimarkup',
+    version='1.0.2',
+    packages=find_packages(),
     description='A basic MediaWiki markup parser.',
     author='David Cramer',
     author_email='dcramer@gmail.com',
-    url='http://code.google.com/p/wikimarkup/',
-    packages=['wikimarkup'],
+    url='http://www.github.com/dcramer/py-wikimarkup/',
+    zip_safe=False,
+    include_package_data=True,
 )
