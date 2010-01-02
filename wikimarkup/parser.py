@@ -2280,11 +2280,11 @@ def truncate_url(url, length=40):
     if not match:
         return url
     l = len(match.group(1))
-    domain = url.replace(match.group(1), '')
     firstpart = url[0:len(url)-l]
     secondpart = match.group(1)
     if firstpart == firstpart[0:length-3]:
-        secondpart = secondpart[0:length-3] + '...'
+        if secondpart != secondpart[0:length-3]:
+            secondpart = secondpart[0:length-3] + '...'
     else:
         firstpart = firstpart[0:length-3]
         secondpart = '...' + secondpart
